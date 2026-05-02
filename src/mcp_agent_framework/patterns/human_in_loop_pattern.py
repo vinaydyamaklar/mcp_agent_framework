@@ -30,11 +30,14 @@ The approval callback receives the tool name and arguments and returns:
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+import time
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastmcp import Client
 
 from mcp_agent_framework.clients.base_client import BaseLLMClient
+from mcp_agent_framework.observability.run_context import RunContext
+from mcp_agent_framework.observability.tracer import TraceEventType
 from mcp_agent_framework.patterns._tool_utils import call_tool, list_tools
 from mcp_agent_framework.types import AgentConfig, Message, StopReason, ToolCall
 
@@ -105,21 +108,63 @@ class HumanInLoopPattern:
         # Pass an empty set to skip approval entirely (equivalent to SingleAgentLoop).
         self._requires_approval = requires_approval  # None means "all tools"
 
-    async def run(self, user_message: str, history: list[Message] | None = None) -> str:
+    async def run(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+        context: RunContext | None = None,
+    ) -> str:
         """Run the agent loop with human approval gates."""
-        async with Client(self._config.mcp_server_config) as mcp:
-            tools    = await list_tools(mcp)
+        t_start = time.monotonic()
+
+        if context:
+            await context.emit(TraceEventType.PATTERN_START, {
+                "pattern_name": "HumanInLoopPattern",
+                "user_message": user_message,
+                "model":        self._llm.provider_name(),
+                "requires_approval": (
+                    list(self._requires_approval)
+                    if self._requires_approval is not None
+                    else "all"
+                ),
+            })
+
+        has_mcp = (
+            not isinstance(self._config.mcp_server_config, dict)
+            or bool(self._config.mcp_server_config.get("mcpServers"))
+        )
+
+        async def _run(mcp: Client | None) -> str:
+            tools    = await list_tools(mcp) if mcp else []
             messages = list(history or [])
             messages.append(Message(role="user", content=user_message))
 
             for iteration in range(self._config.max_iterations):
                 logger.debug("[human-in-loop] iteration %d", iteration + 1)
 
+                if context:
+                    await context.emit(TraceEventType.LLM_START, {
+                        "model":         self._llm.provider_name(),
+                        "iteration":     iteration + 1,
+                        "message_count": len(messages),
+                        "tool_count":    len(tools),
+                    })
+
+                t_llm = time.monotonic()
                 response = await self._llm.complete(
                     messages=messages,
                     tools=tools,
                     system=self._config.system_prompt or None,
                 )
+
+                if context:
+                    await context.emit(TraceEventType.LLM_END, {
+                        "model":         self._llm.provider_name(),
+                        "stop_reason":   response.stop_reason,
+                        "elapsed_ms":    round((time.monotonic() - t_llm) * 1000, 2),
+                        "input_tokens":  response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                    })
 
                 messages.append(Message(
                     role="assistant",
@@ -128,10 +173,18 @@ class HumanInLoopPattern:
                 ))
 
                 if response.stop_reason != StopReason.TOOL_USE or not response.tool_calls:
-                    return response.content or ""
+                    final = response.content or ""
+                    if context:
+                        await context.emit(TraceEventType.PATTERN_END, {
+                            "pattern_name": "HumanInLoopPattern",
+                            "iterations":   iteration + 1,
+                            "result":       final[:200],
+                            "elapsed_ms":   round((time.monotonic() - t_start) * 1000, 2),
+                        })
+                    return final
 
                 for tool_call in response.tool_calls:
-                    result = await self._execute_with_approval(mcp, tool_call)
+                    result = await self._execute_with_approval(mcp, tool_call, context=context)
                     messages.append(Message(
                         role="tool",
                         content=result,
@@ -142,37 +195,126 @@ class HumanInLoopPattern:
             logger.warning("Hit max_iterations=%d", self._config.max_iterations)
             for msg in reversed(messages):
                 if msg.role == "assistant" and msg.content:
+                    if context:
+                        await context.emit(TraceEventType.PATTERN_END, {
+                            "pattern_name":       "HumanInLoopPattern",
+                            "iterations":         self._config.max_iterations,
+                            "result":             msg.content[:200],
+                            "elapsed_ms":         round((time.monotonic() - t_start) * 1000, 2),
+                            "hit_max_iterations": True,
+                        })
                     return msg.content
             return ""
+
+        if has_mcp:
+            async with Client(self._config.mcp_server_config) as mcp:
+                return await _run(mcp)
+        else:
+            return await _run(None)
+
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+        context: RunContext | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        from mcp_agent_framework.types import StreamEvent, ToolCall
+
+        has_mcp = (
+            not isinstance(self._config.mcp_server_config, dict)
+            or bool(self._config.mcp_server_config.get("mcpServers"))
+        )
+
+        async def _stream_loop(mcp):
+            tools = await list_tools(mcp) if mcp else []
+            messages = list(history or [])
+            messages.append(Message(role="user", content=user_message))
+
+            for iteration in range(self._config.max_iterations):
+                text_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_call_events: list[StreamEvent] = []
+                stop_reason: str | None = None
+
+                async for event in self._llm.stream(
+                    messages,
+                    tools=tools,
+                    system=self._config.system_prompt or None,
+                ):
+                    if event.type == "thinking":
+                        thinking_parts.append(event.delta)
+                        yield event
+                    elif event.type == "text":
+                        text_parts.append(event.delta)
+                        yield event
+                    elif event.type == "tool_call":
+                        tool_call_events.append(event)
+                    elif event.type == "done":
+                        stop_reason = event.stop_reason
+
+                content = "".join(text_parts) or None
+                tool_calls_list = (
+                    [ToolCall(id=e.tool_call_id or "", name=e.tool_name or "", arguments=e.tool_args or {})
+                     for e in tool_call_events]
+                    if tool_call_events else None
+                )
+                messages.append(Message(role="assistant", content=content, tool_calls=tool_calls_list))
+
+                if stop_reason != "tool_use" or not tool_call_events:
+                    return
+
+                for tc_event in tool_call_events:
+                    tool_call = ToolCall(
+                        id=tc_event.tool_call_id or "",
+                        name=tc_event.tool_name or "",
+                        arguments=tc_event.tool_args or {},
+                    )
+                    yield StreamEvent(type="tool_start", tool_name=tc_event.tool_name, tool_call_id=tc_event.tool_call_id, tool_args=tc_event.tool_args)
+                    result = await self._execute_with_approval(mcp, tool_call, context=context)
+                    yield StreamEvent(type="tool_end", tool_name=tc_event.tool_name, tool_call_id=tc_event.tool_call_id, tool_result=result)
+                    messages.append(Message(role="tool", content=result, tool_call_id=tool_call.id, name=tool_call.name))
+
+        if has_mcp:
+            async with Client(self._config.mcp_server_config) as mcp:
+                async for event in _stream_loop(mcp):
+                    yield event
+        else:
+            async for event in _stream_loop(None):
+                yield event
 
     # ------------------------------------------------------------------
     # Approval logic
     # ------------------------------------------------------------------
 
-    async def _execute_with_approval(self, mcp: Client, tool_call: ToolCall) -> str:
+    async def _execute_with_approval(
+        self,
+        mcp: Client | None,
+        tool_call: ToolCall,
+        context: RunContext | None = None,
+    ) -> str:
         needs_approval = (
             self._requires_approval is None            # all tools need approval
             or tool_call.name in self._requires_approval   # this specific tool needs it
         )
 
         if not needs_approval:
-            return await call_tool(mcp, tool_call)
+            return await call_tool(mcp, tool_call, context=context)
 
         decision = await self._callback(tool_call.name, tool_call.arguments)
 
         if decision is True:
             logger.info("[approval] APPROVED: %s", tool_call.name)
-            return await call_tool(mcp, tool_call)
+            return await call_tool(mcp, tool_call, context=context)
 
         if isinstance(decision, dict):
             # Human modified the arguments — use the modified version
             logger.info("[approval] APPROVED with modified args: %s", tool_call.name)
             modified = ToolCall(id=tool_call.id, name=tool_call.name, arguments=decision)
-            return await call_tool(mcp, modified)
+            return await call_tool(mcp, modified, context=context)
 
         # Rejected — tell the LLM clearly so it can try a different approach
         reason = decision if isinstance(decision, str) else "Action rejected by user."
-        logger.info("[approval] REJECTED: %s — %s", tool_call.name, reason)
+        logger.info("[approval] REJECTED: %s, %s", tool_call.name, reason)
         return f"Action '{tool_call.name}' was rejected by the user. Reason: {reason}"
 
     @staticmethod

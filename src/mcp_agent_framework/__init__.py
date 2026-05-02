@@ -93,6 +93,7 @@ SKILLS  — named, reusable agentic capabilities
 SERVER SIDE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     MCPServerBase       — subclass to register tools/resources/prompts/memory
+                          pass context=<any> for per-request state (self.ctx)
     StdioTransport      — client spawns server as subprocess
     HttpTransport       — standalone HTTP service (production)
     build_composed_server — merge multiple MCP servers into one endpoint
@@ -106,7 +107,7 @@ INSTALL
 
 # Types
 from mcp_agent_framework.types import (
-    AgentConfig, LLMResponse, MCPTool, Message, StopReason, ToolCall,
+    AgentConfig, LLMResponse, MCPTool, Message, StopReason, StreamEvent, ToolCall,
 )
 
 # Clients
@@ -171,7 +172,7 @@ from mcp_agent_framework.server import (
 
 __all__ = [
     # types
-    "AgentConfig", "LLMResponse", "MCPTool", "Message", "StopReason", "ToolCall",
+    "AgentConfig", "LLMResponse", "MCPTool", "Message", "StopReason", "StreamEvent", "ToolCall",
     # clients
     "BaseLLMClient", "AnthropicClient", "OpenAIClient", "GeminiClient",
     "StructuredOutputError", "schema_from",

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.observability import RunContext
@@ -258,3 +258,49 @@ class EvaluatorOptimizerPattern:
         # Unreachable — loop always returns inside the for body — but satisfies
         # type checkers that expect an explicit return on every path.
         return draft  # pragma: no cover
+
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """
+        Run all evaluate-optimize rounds synchronously; stream the final round's generation.
+        Intermediate rounds (where drafts are rejected) run non-streaming for simplicity.
+        The last round always streams, giving the caller live tokens for the final output.
+        """
+        from mcp_agent_framework.types import StreamEvent
+
+        working_history: list[Message] = list(history or [])
+        original_task = user_message
+        current_prompt = user_message
+
+        for round_idx in range(self._max_rounds):
+            is_last = (round_idx == self._max_rounds - 1)
+
+            if is_last:
+                # Stream the final round
+                gen = SingleAgentLoop(llm_client=self._generator, config=self._config)
+                async for event in gen.run_stream(current_prompt, history=working_history):
+                    yield event
+                return
+
+            # Non-streaming intermediate rounds
+            draft = await SingleAgentLoop(
+                llm_client=self._generator, config=self._config
+            ).run(current_prompt, history=working_history)
+
+            result = await self._evaluator.evaluate(
+                content=draft, task=original_task, iteration=round_idx
+            )
+
+            if result.passed:
+                # Passed early — yield the draft as a single text event
+                yield StreamEvent(type="text", delta=draft)
+                return
+
+            working_history.append(Message(role="assistant", content=draft))
+            current_prompt = (
+                f"Your response scored {result.score:.1%}. "
+                f"Please improve it.\n\nFeedback: {result.feedback}"
+            )

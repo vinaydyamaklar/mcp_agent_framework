@@ -33,7 +33,7 @@ from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.observability.run_context import RunContext
 from mcp_agent_framework.observability.tracer import TraceEventType
 from mcp_agent_framework.patterns._tool_utils import call_tool, list_tools
-from mcp_agent_framework.types import AgentConfig, Message, StopReason
+from mcp_agent_framework.types import AgentConfig, Message, StopReason, ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -164,13 +164,99 @@ class SingleAgentLoop:
                     return msg.content
             return ""
 
-    async def stream(self, user_message: str) -> AsyncIterator[str]:
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+        context: RunContext | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """
-        Yield text chunks as the agent produces them.
-        Tool calls are executed silently; only final text is streamed.
-        Note: full streaming within tool-call loops requires provider-specific
-        support. This implementation yields the final response as one chunk.
+        Stream events from the agent loop token by token.
+
+        Yields:
+            StreamEvent(type="thinking") — reasoning tokens
+            StreamEvent(type="text")     — response tokens
+            StreamEvent(type="tool_start") — before tool execution
+            StreamEvent(type="tool_end")   — after tool execution
+        Tool calls are executed between LLM calls; only text/thinking events stream live.
         """
-        result = await self.run(user_message)
-        yield result
+        from mcp_agent_framework.types import StreamEvent
+
+        has_mcp = (
+            not isinstance(self._config.mcp_server_config, dict)
+            or bool(self._config.mcp_server_config.get("mcpServers"))
+        )
+
+        async def _stream_loop(mcp):
+            tools = await list_tools(mcp) if mcp else []
+            messages = list(history or [])
+            messages.append(Message(role="user", content=user_message))
+
+            for iteration in range(self._config.max_iterations):
+                text_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_call_events: list[StreamEvent] = []
+                stop_reason: str | None = None
+
+                async for event in self._llm.stream(
+                    messages,
+                    tools=tools,
+                    system=self._config.system_prompt or None,
+                ):
+                    if event.type == "thinking":
+                        thinking_parts.append(event.delta)
+                        yield event
+                    elif event.type == "text":
+                        text_parts.append(event.delta)
+                        yield event
+                    elif event.type == "tool_call":
+                        tool_call_events.append(event)
+                    elif event.type == "done":
+                        stop_reason = event.stop_reason
+
+                content = "".join(text_parts) or None
+                tool_calls = (
+                    [ToolCall(id=e.tool_call_id or "", name=e.tool_name or "", arguments=e.tool_args or {})
+                     for e in tool_call_events]
+                    if tool_call_events else None
+                )
+                messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+
+                if stop_reason != "tool_use" or not tool_call_events:
+                    return
+
+                for tc_event in tool_call_events:
+                    tool_call = ToolCall(
+                        id=tc_event.tool_call_id or "",
+                        name=tc_event.tool_name or "",
+                        arguments=tc_event.tool_args or {},
+                    )
+                    yield StreamEvent(
+                        type="tool_start",
+                        tool_name=tc_event.tool_name,
+                        tool_call_id=tc_event.tool_call_id,
+                        tool_args=tc_event.tool_args,
+                    )
+                    result = await call_tool(mcp, tool_call, context=context)
+                    yield StreamEvent(
+                        type="tool_end",
+                        tool_name=tc_event.tool_name,
+                        tool_call_id=tc_event.tool_call_id,
+                        tool_result=result,
+                    )
+                    messages.append(Message(
+                        role="tool",
+                        content=result,
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                    ))
+                    logger.debug("[stream:tool] %s → %s", tool_call.name, result[:80])
+
+        if has_mcp:
+            async with Client(self._config.mcp_server_config) as mcp:
+                async for event in _stream_loop(mcp):
+                    yield event
+        else:
+            async for event in _stream_loop(None):
+                yield event
 

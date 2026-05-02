@@ -19,33 +19,29 @@ child does its work — just what to ask it and what it returns.
          ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
          │ Child A     │ │ Child B     │ │ Child C     │
          │ (full loop) │ │ (full loop) │ │ (full loop) │
-         │ own LLM     │ │ own LLM     │ │ own LLM     │
-         │ own MCP     │ │ own MCP     │ │ own MCP     │
+         │ own LLM     │ │ own MCP     │ │ own MCP     │
          └─────────────┘ └─────────────┘ └─────────────┘
-
-Real-world example:
-  Parent = coordinator agent
-  Child A = ResearchAgent (Nova) — does deep research, returns research.md
-  Child B = WritingAgent  (Brown) — takes research, returns article draft
 
 Each child can itself be a HierarchicalAgentPattern (unlimited depth).
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+import time
+from dataclasses import dataclass
+from typing import Any, AsyncIterator
 
 from fastmcp import Client
 
 from mcp_agent_framework.clients.base_client import BaseLLMClient
+from mcp_agent_framework.observability.run_context import RunContext
+from mcp_agent_framework.observability.tracer import TraceEventType
 from mcp_agent_framework.patterns._tool_utils import call_tool, list_tools
 from mcp_agent_framework.patterns.single_agent_loop import SingleAgentLoop
 from mcp_agent_framework.types import AgentConfig, MCPTool, Message, StopReason, ToolCall
 
 logger = logging.getLogger(__name__)
 
-# Synthetic tool name prefix used when registering child agents as tools
 _CHILD_AGENT_TOOL_PREFIX = "call_agent__"
 
 
@@ -60,48 +56,10 @@ class ChildAgentConfig:
     """
     name: str
     description: str
-    agent: SingleAgentLoop  # can also be HierarchicalAgentPattern — same interface
+    agent: SingleAgentLoop
 
 
 class HierarchicalAgentPattern:
-    """
-    Parent agent that can invoke child agents as tools.
-
-    Child agents appear to the parent as regular tools named
-    "call_agent__<name>". When the parent calls one, this class
-    runs that child's full agent loop and returns the result.
-
-    Usage:
-        research_agent = SingleAgentLoop(
-            llm_client=GeminiClient(),
-            config=AgentConfig(
-                mcp_server_config={"mcpServers": {"nova": {"url": "http://localhost:8001/mcp"}}},
-                system_prompt="You are a research agent. Given a topic, return a detailed research summary.",
-            ),
-        )
-        writing_agent = SingleAgentLoop(
-            llm_client=AnthropicClient(),
-            config=AgentConfig(
-                mcp_server_config={"mcpServers": {"brown": {"url": "http://localhost:8002/mcp"}}},
-                system_prompt="You are a writing agent. Given research notes, write a polished article.",
-            ),
-        )
-
-        children = [
-            ChildAgentConfig("research", "Run deep research on a topic and return a summary.", research_agent),
-            ChildAgentConfig("writing",  "Write an article given research notes.",             writing_agent),
-        ]
-        parent_config = AgentConfig(
-            mcp_server_config={},   # parent may have its own tools too, or empty
-            system_prompt="You are a coordinator. Use research agent then writing agent.",
-        )
-        hierarchy = HierarchicalAgentPattern(
-            llm_client=AnthropicClient(model="claude-opus-4-6"),
-            config=parent_config,
-            children=children,
-        )
-        result = await hierarchy.run("Write an article about RAG systems.")
-    """
 
     def __init__(
         self,
@@ -113,36 +71,55 @@ class HierarchicalAgentPattern:
         self._config   = config
         self._children = {c.name: c for c in children}
 
-    async def run(self, user_message: str, history: list[Message] | None = None) -> str:
-        """Run the parent agent. It may delegate to children as needed."""
-        # Build child-agent tools (synthetic — not from any MCP server)
+    async def run(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+        context: RunContext | None = None,
+    ) -> str:
+        t_start = time.monotonic()
+
+        if context:
+            await context.emit(TraceEventType.PATTERN_START, {
+                "pattern_name": "HierarchicalAgentPattern",
+                "user_message": user_message,
+                "model":        self._llm.provider_name(),
+                "children":     list(self._children.keys()),
+            })
+
         child_tools = self._build_child_tools()
-
-        # Optionally also connect to a parent MCP server for additional tools
-        parent_mcp_tools: list[MCPTool] = []
-        parent_mcp: Client | None = None
-
-        has_parent_mcp = bool(
-            isinstance(self._config.mcp_server_config, dict)
-            and self._config.mcp_server_config.get("mcpServers")
-        )
-
         messages = list(history or [])
         messages.append(Message(role="user", content=user_message))
 
         async def _run_loop(mcp: Client | None) -> str:
-            all_tools = child_tools + (
-                await list_tools(mcp) if mcp else []
-            )
+            all_tools = child_tools + (await list_tools(mcp) if mcp else [])
 
             for iteration in range(self._config.max_iterations):
                 logger.debug("[hierarchy:parent] iteration %d", iteration + 1)
 
+                if context:
+                    await context.emit(TraceEventType.LLM_START, {
+                        "model":         self._llm.provider_name(),
+                        "iteration":     iteration + 1,
+                        "message_count": len(messages),
+                        "tool_count":    len(all_tools),
+                    })
+
+                t_llm = time.monotonic()
                 response = await self._llm.complete(
                     messages=messages,
                     tools=all_tools,
                     system=self._config.system_prompt or None,
                 )
+
+                if context:
+                    await context.emit(TraceEventType.LLM_END, {
+                        "model":         self._llm.provider_name(),
+                        "stop_reason":   response.stop_reason,
+                        "elapsed_ms":    round((time.monotonic() - t_llm) * 1000, 2),
+                        "input_tokens":  response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                    })
 
                 messages.append(Message(
                     role="assistant",
@@ -151,10 +128,18 @@ class HierarchicalAgentPattern:
                 ))
 
                 if response.stop_reason != StopReason.TOOL_USE or not response.tool_calls:
-                    return response.content or ""
+                    final = response.content or ""
+                    if context:
+                        await context.emit(TraceEventType.PATTERN_END, {
+                            "pattern_name": "HierarchicalAgentPattern",
+                            "iterations":   iteration + 1,
+                            "result":       final[:200],
+                            "elapsed_ms":   round((time.monotonic() - t_start) * 1000, 2),
+                        })
+                    return final
 
                 for tool_call in response.tool_calls:
-                    result = await self._dispatch(tool_call, mcp)
+                    result = await self._dispatch(tool_call, mcp, context=context)
                     messages.append(Message(
                         role="tool",
                         content=result,
@@ -166,8 +151,21 @@ class HierarchicalAgentPattern:
             logger.warning("Hit max_iterations=%d", self._config.max_iterations)
             for msg in reversed(messages):
                 if msg.role == "assistant" and msg.content:
+                    if context:
+                        await context.emit(TraceEventType.PATTERN_END, {
+                            "pattern_name":     "HierarchicalAgentPattern",
+                            "iterations":       self._config.max_iterations,
+                            "result":           msg.content[:200],
+                            "elapsed_ms":       round((time.monotonic() - t_start) * 1000, 2),
+                            "hit_max_iterations": True,
+                        })
                     return msg.content
             return ""
+
+        has_parent_mcp = (
+                not isinstance(self._config.mcp_server_config, dict)
+                or bool(self._config.mcp_server_config.get("mcpServers"))
+        )
 
         if has_parent_mcp:
             async with Client(self._config.mcp_server_config) as mcp:
@@ -175,12 +173,79 @@ class HierarchicalAgentPattern:
         else:
             return await _run_loop(None)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+        context: RunContext | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        from mcp_agent_framework.types import StreamEvent, ToolCall as ToolCallType
+
+        child_tools = self._build_child_tools()
+
+        has_parent_mcp = (
+            not isinstance(self._config.mcp_server_config, dict)
+            or bool(self._config.mcp_server_config.get("mcpServers"))
+        )
+
+        async def _stream_loop(mcp):
+            all_tools = child_tools + (await list_tools(mcp) if mcp else [])
+            messages = list(history or [])
+            messages.append(Message(role="user", content=user_message))
+
+            for iteration in range(self._config.max_iterations):
+                text_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_call_events: list[StreamEvent] = []
+                stop_reason: str | None = None
+
+                async for event in self._llm.stream(
+                    messages,
+                    tools=all_tools,
+                    system=self._config.system_prompt or None,
+                ):
+                    if event.type == "thinking":
+                        thinking_parts.append(event.delta)
+                        yield event
+                    elif event.type == "text":
+                        text_parts.append(event.delta)
+                        yield event
+                    elif event.type == "tool_call":
+                        tool_call_events.append(event)
+                    elif event.type == "done":
+                        stop_reason = event.stop_reason
+
+                content = "".join(text_parts) or None
+                tool_calls_list = (
+                    [ToolCallType(id=e.tool_call_id or "", name=e.tool_name or "", arguments=e.tool_args or {})
+                     for e in tool_call_events]
+                    if tool_call_events else None
+                )
+                messages.append(Message(role="assistant", content=content, tool_calls=tool_calls_list))
+
+                if stop_reason != "tool_use" or not tool_call_events:
+                    return
+
+                for tc_event in tool_call_events:
+                    tool_call = ToolCallType(
+                        id=tc_event.tool_call_id or "",
+                        name=tc_event.tool_name or "",
+                        arguments=tc_event.tool_args or {},
+                    )
+                    yield StreamEvent(type="tool_start", tool_name=tc_event.tool_name, tool_call_id=tc_event.tool_call_id, tool_args=tc_event.tool_args)
+                    result = await self._dispatch(tool_call, mcp, context=context)
+                    yield StreamEvent(type="tool_end", tool_name=tc_event.tool_name, tool_call_id=tc_event.tool_call_id, tool_result=result)
+                    messages.append(Message(role="tool", content=result, tool_call_id=tool_call.id, name=tool_call.name))
+
+        if has_parent_mcp:
+            async with Client(self._config.mcp_server_config) as mcp:
+                async for event in _stream_loop(mcp):
+                    yield event
+        else:
+            async for event in _stream_loop(None):
+                yield event
 
     def _build_child_tools(self) -> list[MCPTool]:
-        """Expose each child agent as a tool to the parent LLM."""
         return [
             MCPTool(
                 name=f"{_CHILD_AGENT_TOOL_PREFIX}{name}",
@@ -199,8 +264,12 @@ class HierarchicalAgentPattern:
             for name, child in self._children.items()
         ]
 
-    async def _dispatch(self, tool_call: ToolCall, parent_mcp: Client | None) -> str:
-        """Route tool call to a child agent or parent MCP tool."""
+    async def _dispatch(
+        self,
+        tool_call: ToolCall,
+        parent_mcp: Client | None,
+        context: RunContext | None = None,
+    ) -> str:
         if tool_call.name.startswith(_CHILD_AGENT_TOOL_PREFIX):
             child_name = tool_call.name[len(_CHILD_AGENT_TOOL_PREFIX):]
             child = self._children.get(child_name)
@@ -208,11 +277,10 @@ class HierarchicalAgentPattern:
                 return f"Error: no child agent named '{child_name}'"
             task = tool_call.arguments.get("task", "")
             logger.debug("[hierarchy] delegating to child '%s': %s", child_name, task[:80])
-            return await child.agent.run(task)
+            child_context = context.child() if context else None
+            return await child.agent.run(task, context=child_context)
 
-        # Fall through to parent MCP tools
         if parent_mcp:
-            return await call_tool(parent_mcp, tool_call)
+            return await call_tool(parent_mcp, tool_call, context=context)
 
         return f"Error: no handler for tool '{tool_call.name}'"
-

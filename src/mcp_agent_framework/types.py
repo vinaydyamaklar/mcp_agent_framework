@@ -80,6 +80,32 @@ class LLMResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
 
+    # populated when model returns thinking/reasoning blocks (e.g. Claude extended thinking)
+    reasoning: str | None = None
+
+
+@dataclass
+class StreamEvent:
+    """
+    A single event emitted during a streaming agent run.
+
+    type values:
+      "thinking"   — incremental reasoning token (model's chain-of-thought)
+      "text"       — incremental response token
+      "tool_call"  — internal: a tool call collected from the LLM stream
+                     (used by client.stream(); patterns convert to tool_start/tool_end)
+      "tool_start" — pattern is about to execute a tool (yielded by run_stream())
+      "tool_end"   — tool has returned a result (yielded by run_stream())
+      "done"       — stream complete; stop_reason is populated
+    """
+    type: str
+    delta: str = ""                          # text / thinking chunk
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    tool_args: dict[str, Any] | None = None  # on tool_call / tool_start events
+    tool_result: str | None = None           # on tool_end events
+    stop_reason: str | None = None           # on done event: "end_turn" | "tool_use" | "max_tokens"
+
 
 @dataclass
 class AgentConfig:

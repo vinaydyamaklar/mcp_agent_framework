@@ -97,9 +97,26 @@ class LLMResponse:
     stop_reason:   StopReason
     input_tokens:  int | None             # cost tracking
     output_tokens: int | None
+    reasoning:     str | None             # model's chain-of-thought (Claude extended thinking)
 ```
 
-The pattern is always: check `stop_reason` first, then read either `content` or `tool_calls`.
+The pattern is always: check `stop_reason` first, then read either `content` or `tool_calls`. `reasoning` is populated only when the client has `enable_thinking=True` — it is `None` otherwise.
+
+### `StreamEvent` — one event from a streaming run
+
+```python
+@dataclass
+class StreamEvent:
+    type:         str                    # "thinking" | "text" | "tool_start" | "tool_end" | "done"
+    delta:        str = ""              # incremental text or thinking token
+    tool_name:    str | None = None
+    tool_call_id: str | None = None
+    tool_args:    dict | None = None    # on tool_start — the arguments
+    tool_result:  str | None = None     # on tool_end — the result string
+    stop_reason:  str | None = None     # on done — "end_turn" | "tool_use" | "max_tokens"
+```
+
+`StreamEvent` is what `run_stream()` yields on every pattern. Instead of waiting for the full answer, the caller receives one event per token — or per tool execution step. `"thinking"` and `"text"` events carry incremental `delta` strings. `"tool_start"` / `"tool_end"` bracket each MCP tool call.
 
 ### `AgentConfig` — how you configure any pattern
 
@@ -206,7 +223,8 @@ This function will be your most-used debug tool for the rest of the curriculum. 
 | `StopReason` | Why the LLM stopped: done, needs tools, or hit token limit |
 | `ToolCall` | The LLM's request to execute a tool — name + args + unique ID |
 | `Message` | One turn in the conversation — user, assistant, tool result, or system |
-| `LLMResponse` | Normalised output from any provider |
+| `LLMResponse` | Normalised output from any provider; includes `reasoning` when thinking is enabled |
+| `StreamEvent` | One event from a streaming run — thinking token, text token, tool step, or done |
 | `AgentConfig` | Config passed to any pattern |
 | `MCPTool` | A tool's description as advertised by the MCP server |
 
@@ -221,4 +239,4 @@ This function will be your most-used debug tool for the rest of the curriculum. 
 
 ---
 
-*Lesson 2 of 20 — Applied AI Engineering*
+*Lesson 2 of 21 — Applied AI Engineering*

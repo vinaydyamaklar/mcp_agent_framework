@@ -28,9 +28,11 @@ import json
 import os
 from typing import Any
 
+from collections.abc import AsyncIterator
+
 from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.clients.schema_utils import StructuredOutputError, schema_from
-from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, ToolCall
+from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, StreamEvent, ToolCall
 
 
 class GeminiClient(BaseLLMClient):
@@ -141,6 +143,45 @@ class GeminiClient(BaseLLMClient):
             raise StructuredOutputError(
                 f"Gemini ({self._model}) returned non-JSON content: {text[:200]}"
             ) from exc
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[MCPTool] | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        t = self._types
+        contents = [self._encode_message(m) for m in messages]
+        config_kwargs: dict[str, Any] = {**self._extra}
+        if system:
+            config_kwargs["system_instruction"] = system
+        if tools:
+            config_kwargs["tools"] = [self._encode_tools(tools)]
+        config = t.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+        has_tool_calls = False
+        async for chunk in self._client.aio.models.generate_content_stream(
+            model=self._model,
+            contents=contents,
+            config=config,
+        ):
+            candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
+            if not candidate or not candidate.content:
+                continue
+            for part in candidate.content.parts:
+                if getattr(part, "text", None):
+                    yield StreamEvent(type="text", delta=part.text)
+                elif getattr(part, "function_call", None) is not None:
+                    fc = part.function_call
+                    has_tool_calls = True
+                    yield StreamEvent(
+                        type="tool_call",
+                        tool_name=fc.name,
+                        tool_call_id=getattr(fc, "id", None) or fc.name,
+                        tool_args=dict(fc.args) if fc.args else {},
+                    )
+
+        yield StreamEvent(type="done", stop_reason="tool_use" if has_tool_calls else "end_turn")
 
     # ── Encode: Canonical → Gemini ───────────────────────────────────────────
 

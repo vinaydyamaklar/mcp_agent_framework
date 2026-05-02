@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-from mcp_agent_framework.types import LLMResponse, MCPTool, Message
+from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StreamEvent
 
 
 class BaseLLMClient(ABC):
@@ -82,22 +82,22 @@ class BaseLLMClient(ABC):
         """Human-readable provider name used in logs."""
         ...
 
-    async def stream_complete(
+    async def stream(
         self,
         messages: list[Message],
         tools: list[MCPTool] | None = None,
         system: str | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[StreamEvent]:
         """
-        Stream tokens from the LLM as they are generated.
-
-        Default implementation falls back to complete() and yields the full
-        response as a single chunk. Override in provider clients for real streaming.
-
-        Usage:
-            async for token in client.stream_complete(messages):
-                print(token, end="", flush=True)
+        Stream events from the LLM. Default implementation falls back to complete()
+        and yields events as one chunk. Override in provider clients for real streaming.
         """
         response = await self.complete(messages, tools=tools, system=system)
+        if response.reasoning:
+            yield StreamEvent(type="thinking", delta=response.reasoning)
         if response.content:
-            yield response.content
+            yield StreamEvent(type="text", delta=response.content)
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                yield StreamEvent(type="tool_call", tool_name=tc.name, tool_call_id=tc.id, tool_args=tc.arguments)
+        yield StreamEvent(type="done", stop_reason=response.stop_reason.value)

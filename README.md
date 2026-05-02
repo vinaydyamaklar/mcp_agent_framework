@@ -21,44 +21,6 @@
 
 ---
 
-## LangGraph - how it compares
-
-[LangGraph](https://github.com/langchain-ai/langgraph) is a standalone framework for building stateful, graph-structured agents. It is one of the most widely used agent frameworks and has several features that go beyond what this framework implements directly.
-
-**What LangGraph is famous for:**
-
-| LangGraph feature | What it does | Equivalent here |
-|---|---|---|
-| **Interrupts** | Pause a running graph mid-execution, surface state to a human or external system, then resume from exactly where it stopped - across process restarts | `HumanInLoopPattern` handles approval callbacks but does not persist + resume across restarts |
-| **Checkpointing** | Every graph node's state is saved to a persistent backend (Postgres, SQLite, Redis) after each step. You can replay, branch, or resume any prior run by ID | No built-in persistence - state lives in memory for the duration of a `run()` call |
-| **Conditional edges** | Route execution to different nodes based on LLM output, tool results, or custom logic - the graph topology itself is dynamic | Implemented in each pattern's Python loop; not a declarative graph |
-| **Human-in-the-loop at scale** | Interrupts + checkpointing combine to make async human review practical in production: the graph pauses, a human reviews hours later, execution resumes | `HumanInLoopPattern` is synchronous - the event loop blocks waiting for the approval callback |
-| **Time travel / branching** | Rewind to any earlier checkpoint and run a different branch from that point (useful for A/B testing agent behaviour or recovering from bad decisions) | Not supported |
-| **Streaming token-by-token** | Built-in support for streaming individual tokens out of any node as they are generated | `stream()` in `SingleAgentLoop` yields the full response as one chunk |
-| **Studio UI** | LangGraph Studio gives a visual debugger: see the graph topology, step through node executions, inspect state at each checkpoint | Not included |
-
-**Why this framework doesn't use LangGraph:**
-
-This framework was built from scratch intentionally - as a teaching tool. Every loop, every state transition, every tool-routing decision is visible in plain Python. The goal is for you to understand *what LangGraph (and similar frameworks) are actually doing under the hood* before you pick one up.
-
-Once you understand how a `SingleAgentLoop` works at the Python level, LangGraph's `StateGraph` + `ToolNode` pattern becomes immediately readable. The concepts are the same; LangGraph adds production infrastructure (persistence, interrupts, Studio) on top.
-
-**When to reach for LangGraph instead:**
-
-- You need persistent, resumable runs (agent pauses overnight, resumes next day)
-- You need async human approval in production (interrupt → human reviews → resume)
-- You want time travel / branching for debugging or A/B testing agent behaviour
-- You want a visual graph editor and step-through debugger
-
-**When this framework is the right tool:**
-
-- You are learning how agents work and want to read every line
-- You need a lightweight, dependency-minimal base with no framework lock-in
-- You are integrating with MCP servers specifically
-- You need full control over provider differences (Anthropic, OpenAI, Gemini)
-
----
-
 ## Table of Contents
 
 1. [What this framework is and why it exists](#1-what-this-framework-is-and-why-it-exists)
@@ -81,6 +43,7 @@ Once you understand how a `SingleAgentLoop` works at the Python level, LangGraph
 18. [How to copy this into your own project](#18-how-to-copy-this-into-your-own-project)
 19. [Skills — named, reusable agentic capabilities](#19-skills--named-reusable-agentic-capabilities)
 20. [Applied AI Engineering Curriculum](#20-applied-ai-engineering-curriculum)
+21. [LangGraph - how it compares](#langgraph---how-it-compares)
 
 ---
 
@@ -689,6 +652,60 @@ from mcp_agent_framework import build_composed_server
 composed = build_composed_server([search_server, database_server], name="combined")
 composed.run(HttpTransport(port=8001))
 ```
+
+### Context-aware servers — per-request state
+
+Standard MCP servers are singletons. All requests share the same instance, which means tools can't safely access per-request state: the current user, their permissions, their database connection.
+
+The fix: pass `context` to `MCPServerBase` and create a fresh instance per request. Tools close over `self.ctx` naturally.
+
+```python
+from dataclasses import dataclass
+from mcp_agent_framework.server import MCPServerBase
+
+@dataclass
+class RequestContext:
+    user_id:     str
+    permissions: set[str]
+    db:          object   # per-request DB connection
+
+class CRMServer(MCPServerBase):
+    def __init__(self, ctx: RequestContext):
+        super().__init__("crm", context=ctx)
+
+        @self.tool
+        async def get_customer(customer_id: str) -> str:
+            """Get customer record by ID."""
+            if "crm:read" not in self.ctx.permissions:
+                return "Permission denied."
+            return await self.ctx.db.fetch(customer_id)
+
+        @self.tool
+        async def delete_customer(customer_id: str) -> str:
+            """Delete a customer record."""
+            if "crm:admin" not in self.ctx.permissions:
+                return "Permission denied. Admin access required."
+            await self.ctx.db.delete(customer_id)
+            return f"Customer {customer_id} deleted."
+
+# Per-request — fresh instance, fresh context, no shared state
+async def handle_request(user_id: str, message: str) -> str:
+    ctx = RequestContext(
+        user_id=user_id,
+        permissions=await load_permissions(user_id),
+        db=await db_pool.acquire(),
+    )
+    server = CRMServer(ctx)
+    agent = SingleAgentLoop(
+        llm_client=AnthropicClient(),
+        config=AgentConfig(mcp_server_config=server.mcp),
+    )
+    return await agent.run(message)
+```
+
+The agent sees the same tools regardless of who is calling — but each tool enforces the caller's permissions via `self.ctx`. No global state, no thread-locals, no leakage between requests.
+
+See `examples/context_aware_server.py` for a full working demo.
 
 ---
 
@@ -2305,7 +2322,7 @@ See `examples/12_skills.py` for a full working demo covering:
 
 ## 20. Applied AI Engineering Curriculum
 
-This framework is the textbook. These 20 lessons take you from "what is an agent?" to building production multi-agent systems with skills, RAG, resilience, and LangGraph integration.
+This framework is the textbook. These 21 lessons take you from "what is an agent?" to building production multi-agent systems with skills, RAG, resilience, LangGraph integration, and multi-modal pipelines.
 
 Estimated time: 40–60 hours of focused study and hands-on work.
 
@@ -2331,6 +2348,7 @@ Estimated time: 40–60 hours of focused study and hands-on work.
 | 18 | Observability | RunContext, LoggingTracer, custom tracers | — |
 | 19 | LangGraph integration | Checkpointing, interrupts, time travel, streaming | `langgraph+mcp_agent_framework/` |
 | 20 | Agentic Skills | Skill, SkillRegistry, SkillAwareAgent; composable capabilities | `12_skills.py` |
+| 21 | Multi-modal pipeline | Combining LLMs, image models, and local tools; rembg, DALL-E, Pillow | `product_image_pipeline.py` |
 
 ### How to use this curriculum
 
@@ -2341,7 +2359,45 @@ Work through each lesson in order. For each lesson:
 4. Modify the example — break something, fix it, add a feature
 5. Build one small project using only the concepts from that lesson
 
-The lessons are cumulative. By Lesson 20 you will have built every component of a production-grade multi-agent system from scratch.
+The lessons are cumulative. By Lesson 21 you will have built every component of a production-grade multi-agent system from scratch.
+
+---
+
+## LangGraph - how it compares
+
+[LangGraph](https://github.com/langchain-ai/langgraph) is a standalone framework for building stateful, graph-structured agents. It is one of the most widely used agent frameworks and has several features that go beyond what this framework implements directly.
+
+**What LangGraph is famous for:**
+
+| LangGraph feature | What it does | Equivalent here |
+|---|---|---|
+| **Interrupts** | Pause a running graph mid-execution, surface state to a human or external system, then resume from exactly where it stopped - across process restarts | `HumanInLoopPattern` handles approval callbacks but does not persist + resume across restarts |
+| **Checkpointing** | Every graph node's state is saved to a persistent backend (Postgres, SQLite, Redis) after each step. You can replay, branch, or resume any prior run by ID | No built-in persistence - state lives in memory for the duration of a `run()` call |
+| **Conditional edges** | Route execution to different nodes based on LLM output, tool results, or custom logic - the graph topology itself is dynamic | Implemented in each pattern's Python loop; not a declarative graph |
+| **Human-in-the-loop at scale** | Interrupts + checkpointing combine to make async human review practical in production: the graph pauses, a human reviews hours later, execution resumes | `HumanInLoopPattern` is synchronous - the event loop blocks waiting for the approval callback |
+| **Time travel / branching** | Rewind to any earlier checkpoint and run a different branch from that point (useful for A/B testing agent behaviour or recovering from bad decisions) | Not supported |
+| **Streaming token-by-token** | Built-in support for streaming individual tokens out of any node as they are generated | `stream()` in `SingleAgentLoop` yields the full response as one chunk |
+| **Studio UI** | LangGraph Studio gives a visual debugger: see the graph topology, step through node executions, inspect state at each checkpoint | Not included |
+
+**Why this framework doesn't use LangGraph:**
+
+This framework was built from scratch intentionally - as a teaching tool. Every loop, every state transition, every tool-routing decision is visible in plain Python. The goal is for you to understand *what LangGraph (and similar frameworks) are actually doing under the hood* before you pick one up.
+
+Once you understand how a `SingleAgentLoop` works at the Python level, LangGraph's `StateGraph` + `ToolNode` pattern becomes immediately readable. The concepts are the same; LangGraph adds production infrastructure (persistence, interrupts, Studio) on top.
+
+**When to reach for LangGraph instead:**
+
+- You need persistent, resumable runs (agent pauses overnight, resumes next day)
+- You need async human approval in production (interrupt → human reviews → resume)
+- You want time travel / branching for debugging or A/B testing agent behaviour
+- You want a visual graph editor and step-through debugger
+
+**When this framework is the right tool:**
+
+- You are learning how agents work and want to read every line
+- You need a lightweight, dependency-minimal base with no framework lock-in
+- You are integrating with MCP servers specifically
+- You need full control over provider differences (Anthropic, OpenAI, Gemini)
 
 ---
 

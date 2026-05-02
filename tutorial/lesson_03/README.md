@@ -53,21 +53,49 @@ class BaseLLMClient(ABC):
         self,
         messages:       list[Message],
         response_model: type[BaseModel],
-    ) -> StructuredModelResponse: ...
+    ) -> dict[str, Any]: ...
 
     @abstractmethod
     def provider_name(self) -> str: ...
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools:    list[MCPTool] | None = None,
+        system:   str | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
 ```
 
-Three methods. That is the entire contract. If you implement these three, your client works with every pattern in the framework.
-
-`complete()` is the regular loop call. `complete_structured()` forces a Pydantic model response. `provider_name()` is just a string for logging.
+Four methods. The first three are abstract — every client must implement them. `stream()` has a default implementation that falls back to `complete()` and yields the full response as a single event, so it works on any client without override. Override it in provider clients for real token-by-token streaming.
 
 ---
 
 ## Inside each client
 
 ### `AnthropicClient`
+
+**Extended thinking** — Claude supports a reasoning mode where the model "thinks out loud" before answering. Enable it at construction time:
+
+```python
+client = AnthropicClient(
+    enable_thinking=True,   # turn on reasoning blocks
+    thinking_budget=8000,   # max tokens the model can spend thinking
+)
+
+# Non-streaming: reasoning lands in LLMResponse.reasoning
+response = await client.complete(messages)
+print(response.reasoning)  # "Let me consider... first I should..."
+print(response.content)    # the actual answer
+
+# Streaming: reasoning arrives as StreamEvent(type="thinking") events
+async for event in client.stream(messages):
+    if event.type == "thinking":
+        print(event.delta, end="")  # live reasoning tokens
+    elif event.type == "text":
+        print(event.delta, end="")  # live response tokens
+```
+
+`enable_thinking=False` is the default. When disabled, `response.reasoning` is always `None`.
 
 **Message encoding** — Anthropic's format is unique: each message has a `content` field that is a *list* of content blocks, not a plain string. A tool result is a content block with `type="tool_result"`.
 
@@ -221,6 +249,10 @@ Notice: your calling code only uses `BaseLLMClient`-compatible methods. Swapping
 | `_encode_message` | Converts `Message` → provider-specific format |
 | `_decode_response` | Converts provider response → `LLMResponse` |
 | `complete_structured` | Forces a Pydantic model response from any provider |
+| `stream()` | Yields `StreamEvent` objects token by token; falls back to `complete()` if not overridden |
+| `enable_thinking` | `AnthropicClient` flag that enables Claude's extended reasoning mode |
+| `thinking_budget` | Max tokens Claude may spend on reasoning before producing the answer |
+| `LLMResponse.reasoning` | The model's chain-of-thought; populated only when `enable_thinking=True` |
 | `StructuredOutputError` | Raised when the provider fails to return valid structured data |
 
 ---
@@ -234,4 +266,4 @@ Notice: your calling code only uses `BaseLLMClient`-compatible methods. Swapping
 
 ---
 
-*Lesson 3 of 20 — Applied AI Engineering*
+*Lesson 3 of 21 — Applied AI Engineering*

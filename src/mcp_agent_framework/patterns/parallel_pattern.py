@@ -50,6 +50,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from typing import AsyncIterator
 
 from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.observability.run_context import RunContext
@@ -247,6 +248,29 @@ class ParallelPattern:
         )
 
         return response.content or ""
+
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Fan-out runs synchronously; stream the synthesis response."""
+        from mcp_agent_framework.types import StreamEvent
+
+        results: list[ParallelResult] = await asyncio.gather(
+            *[self._run_task(task, user_message) for task in self._tasks],
+        )
+
+        synthesis_input = self._build_synthesis_prompt(results, user_message)
+        synth_messages = list(history or [])
+        synth_messages.append(Message(role="user", content=synthesis_input))
+
+        async for event in self._synthesiser.stream(
+            synth_messages,
+            tools=None,
+            system=self._config.system_prompt or None,
+        ):
+            yield event
 
     # ------------------------------------------------------------------
     # Internal helpers

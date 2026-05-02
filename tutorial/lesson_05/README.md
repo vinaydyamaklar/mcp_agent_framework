@@ -112,17 +112,42 @@ The good prompt gives the agent clear identity, procedure, formatting rules, and
 
 Setting this too low cuts off agents mid-task. Too high means a stuck agent wastes money. Start at 20 and tune down once you understand your task's typical iteration count.
 
-### The `stream()` method
+### `run_stream()` — live token streaming
+
+Every pattern has a `run_stream()` alongside `run()`. Same inputs, different output — instead of waiting for the full answer, you receive one `StreamEvent` per token:
 
 ```python
-async def stream(self, user_message: str) -> AsyncIterator[str]:
-    result = await self.run(user_message)
-    yield result
+async for event in agent.run_stream("Write a blog post about MCP"):
+    match event.type:
+        case "thinking":    print(event.delta, end="", flush=True)  # reasoning tokens
+        case "text":        print(event.delta, end="", flush=True)  # response tokens
+        case "tool_start":  print(f"\n[calling {event.tool_name}...]")
+        case "tool_end":    print(f" done\n")
 ```
 
-Currently `stream()` runs the full loop and yields the complete result at the end. It does not stream tokens mid-generation. True token-level streaming during tool-call loops requires provider-specific async streaming support — see Lesson 19 (LangGraph streaming) for the production approach.
+The loop still executes tool calls synchronously — streaming is paused while a tool runs, then resumes for the next LLM turn. The `tool_start` / `tool_end` events let you show a spinner or progress indicator in your UI.
 
-Use `stream()` today when your calling code expects an `AsyncIterator` but you don't need real-time tokens.
+**All four combinations:**
+
+| `enable_thinking` | method | what arrives |
+|---|---|---|
+| `False` (default) | `run()` | `str` at the end |
+| `False` (default) | `run_stream()` | `text` events, token by token |
+| `True` | `client.complete()` | `LLMResponse` with both `content` and `reasoning` |
+| `True` | `run_stream()` | `thinking` events then `text` events, both live |
+
+Enable thinking on the client, not on the pattern:
+
+```python
+client = AnthropicClient(enable_thinking=True, thinking_budget=8000)
+agent  = SingleAgentLoop(llm_client=client, config=config)
+
+async for event in agent.run_stream("Explain why BM25 beats TF-IDF for short queries"):
+    if event.type == "thinking":
+        print(f"💭 {event.delta}", end="")
+    elif event.type == "text":
+        print(event.delta, end="")
+```
 
 ---
 
@@ -205,11 +230,12 @@ Observe how many iterations it takes and which tools it calls in what order.
 
 | Term | Meaning |
 |------|---------|
-| `run()` | Execute the full agent loop on one user message |
+| `run()` | Execute the full agent loop, block until done, return `str` |
+| `run_stream()` | Execute the full agent loop, yield `StreamEvent` objects live |
 | `history` | Prior conversation context to continue from |
 | `system_prompt` | Instructions given to the LLM before any user messages |
 | `max_iterations` | Safety cap — prevents infinite tool-call loops |
-| `stream()` | Returns the result as an `AsyncIterator` (currently non-streaming) |
+| `StreamEvent` | One event from a streaming run: text token, thinking token, or tool step |
 
 ---
 
@@ -220,7 +246,8 @@ Observe how many iterations it takes and which tools it calls in what order.
 - **Lesson 8** — `OrchestratorWorkerPattern` uses multiple `SingleAgentLoop` instances as workers
 - **Lesson 12** — `EvaluatorOptimizerPattern` runs `SingleAgentLoop` in a quality loop
 - **Lesson 20** — `SkillAwareAgent` wraps `SingleAgentLoop` with a skill registry
+- **`examples/13_streaming.py`** — all four streaming/thinking combinations in one runnable file
 
 ---
 
-*Lesson 5 of 20 — Applied AI Engineering*
+*Lesson 5 of 21 — Applied AI Engineering*

@@ -163,6 +163,51 @@ The agent doesn't know or care that tools came from different servers. It just s
 
 ---
 
+## Context-aware servers — per-request state
+
+Standard MCP servers are singletons. All requests share the same instance. That's fine for stateless tools, but breaks down when tools need to know *who is calling* — for permission checks, tenant isolation, or per-user database connections.
+
+The fix: pass `context` to `MCPServerBase` and create a fresh instance per request. Tools close over `self.ctx` — no global state, no leakage.
+
+```python
+from dataclasses import dataclass
+from mcp_agent_framework.server import MCPServerBase
+
+@dataclass
+class RequestContext:
+    user_id:     str
+    permissions: set[str]
+
+class SupportServer(MCPServerBase):
+    def __init__(self, ctx: RequestContext):
+        super().__init__("support", context=ctx)
+
+        @self.tool
+        async def close_ticket(ticket_id: str) -> str:
+            """Close a support ticket. Requires 'tickets:close' permission."""
+            if "tickets:close" not in self.ctx.permissions:
+                return f"Permission denied for user {self.ctx.user_id}."
+            # ... close the ticket ...
+            return f"Ticket {ticket_id} closed."
+
+# Per-request: fresh server, fresh context
+async def handle(user_id: str, message: str) -> str:
+    ctx = RequestContext(
+        user_id=user_id,
+        permissions=await load_permissions(user_id),
+    )
+    server = SupportServer(ctx)
+    agent = SingleAgentLoop(
+        llm_client=AnthropicClient(),
+        config=AgentConfig(mcp_server_config=server.mcp),
+    )
+    return await agent.run(message)
+```
+
+The LLM sees the same tools for all users. Permission logic lives inside the tool, not the prompt.
+
+---
+
 ## Read these files
 
 ```
@@ -229,6 +274,7 @@ Wire it to a `SingleAgentLoop` (from Lesson 5). Ask it: *"Create a file called h
 | In-process transport | FastMCP instance used directly, no network |
 | Stdio transport | Tool server as subprocess, stdin/stdout communication |
 | HTTP transport | Tool server as standalone service, REST communication |
+| `context` param | Per-request state injected into `MCPServerBase` via `self.ctx`; enables multi-tenant, permission-scoped tools |
 
 ---
 
@@ -242,4 +288,4 @@ Wire it to a `SingleAgentLoop` (from Lesson 5). Ask it: *"Create a file called h
 
 ---
 
-*Lesson 4 of 20 — Applied AI Engineering*
+*Lesson 4 of 21 — Applied AI Engineering*

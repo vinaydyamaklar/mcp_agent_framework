@@ -52,7 +52,7 @@ FULL EXAMPLE - see bottom of this file
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastmcp import FastMCP
 
@@ -71,11 +71,38 @@ class MCPServerBase:
 
     Internally wraps FastMCP. You can always access the raw FastMCP instance
     via self.mcp if you need anything not exposed here.
+
+    Args:
+        name:    Server name passed to FastMCP.
+        version: Server version string.
+        context: Optional per-request context object stored as ``self.ctx``.
+                 Use this for multi-tenant systems where tools need access to
+                 request-scoped state (user ID, DB connection, permissions, etc.).
+                 Defaults to None — existing subclasses are unaffected.
+
+    Context example::
+
+        @dataclass
+        class RequestContext:
+            user_id: str
+            permissions: set[str]
+            db: Database
+
+        class CRMServer(MCPServerBase):
+            def __init__(self, ctx: RequestContext):
+                super().__init__("crm", context=ctx)
+
+                @self.tool
+                async def get_customer(customer_id: str) -> str:
+                    if "crm:read" not in self.ctx.permissions:
+                        return "Permission denied."
+                    return await self.ctx.db.fetch(customer_id)
     """
 
-    def __init__(self, name: str, version: str = "0.1.0"):
+    def __init__(self, name: str, version: str = "0.1.0", context: Any = None):
         self.mcp = FastMCP(name=name, version=version)
         self._name = name
+        self.ctx: Any = context  # per-request context; None by default (backward compatible)
 
     # ──────────────────────────────────────────────────────────────────
     # 1. TOOLS  - actions the LLM calls

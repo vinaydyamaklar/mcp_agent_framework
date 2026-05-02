@@ -27,9 +27,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from collections.abc import AsyncIterator
+
 from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.clients.schema_utils import StructuredOutputError, schema_from
-from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, ToolCall
+from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, StreamEvent, ToolCall
 
 
 class AnthropicClient(BaseLLMClient):
@@ -39,6 +41,8 @@ class AnthropicClient(BaseLLMClient):
         model: str = "claude-sonnet-4-6",
         api_key: str | None = None,
         max_tokens: int = 8096,
+        enable_thinking: bool = False,
+        thinking_budget: int = 8000,
         **kwargs: Any,
     ) -> None:
         try:
@@ -55,10 +59,12 @@ class AnthropicClient(BaseLLMClient):
                 "ANTHROPIC_API_KEY environment variable is not set. "
                 "Export it or pass api_key= explicitly."
             )
-        self._client     = self._anthropic.AsyncAnthropic(api_key=resolved_key)
-        self._model      = model
-        self._max_tokens = max_tokens
-        self._extra      = kwargs  # temperature, top_p, etc.
+        self._client          = self._anthropic.AsyncAnthropic(api_key=resolved_key)
+        self._model           = model
+        self._max_tokens      = max_tokens
+        self._enable_thinking = enable_thinking
+        self._thinking_budget = thinking_budget
+        self._extra           = kwargs  # temperature, top_p, etc.
 
     def provider_name(self) -> str:
         return f"anthropic/{self._model}"
@@ -81,6 +87,8 @@ class AnthropicClient(BaseLLMClient):
             params["system"] = system            # Anthropic: system is a top-level param
         if tools:
             params["tools"] = [self._encode_tool(t) for t in tools]
+        if self._enable_thinking:
+            params["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
 
         raw = await self._client.messages.create(**params)
         return self._decode_response(raw)
@@ -191,9 +199,12 @@ class AnthropicClient(BaseLLMClient):
 
         text:       str | None        = None
         tool_calls: list[ToolCall] | None = None
+        reasoning_parts: list[str] = []
 
         for block in raw.content:
-            if block.type == "text":
+            if block.type == "thinking":
+                reasoning_parts.append(block.thinking)
+            elif block.type == "text":
                 text = block.text
             elif block.type == "tool_use":
                 if tool_calls is None:
@@ -204,10 +215,63 @@ class AnthropicClient(BaseLLMClient):
                     arguments=block.input,   # already a dict
                 ))
 
+        reasoning = "".join(reasoning_parts) if reasoning_parts else None
+
         return LLMResponse(
             content=text,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             input_tokens=raw.usage.input_tokens if raw.usage else None,
             output_tokens=raw.usage.output_tokens if raw.usage else None,
+            reasoning=reasoning,
         )
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[MCPTool] | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        params: dict[str, Any] = {
+            "model":      self._model,
+            "max_tokens": self._max_tokens,
+            "messages":   [self._encode_message(m) for m in messages],
+            **self._extra,
+        }
+        if system:
+            params["system"] = system
+        if tools:
+            params["tools"] = [self._encode_tool(t) for t in tools]
+        if self._enable_thinking:
+            params["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+
+        async with self._client.messages.stream(**params) as stream:
+            async for event in stream:
+                etype = getattr(event, "type", None)
+                if etype == "content_block_delta":
+                    delta = event.delta
+                    dtype = getattr(delta, "type", None)
+                    if dtype == "text_delta" and getattr(delta, "text", None):
+                        yield StreamEvent(type="text", delta=delta.text)
+                    elif dtype == "thinking_delta" and getattr(delta, "thinking", None):
+                        yield StreamEvent(type="thinking", delta=delta.thinking)
+                    # input_json_delta: skip — accumulated in final message
+
+            final = await stream.get_final_message()
+            for block in final.content:
+                if getattr(block, "type", None) == "tool_use":
+                    yield StreamEvent(
+                        type="tool_call",
+                        tool_name=block.name,
+                        tool_call_id=block.id,
+                        tool_args=block.input,
+                    )
+
+            stop = final.stop_reason
+            if stop == "tool_use":
+                sr = "tool_use"
+            elif stop == "max_tokens":
+                sr = "max_tokens"
+            else:
+                sr = "end_turn"
+            yield StreamEvent(type="done", stop_reason=sr)

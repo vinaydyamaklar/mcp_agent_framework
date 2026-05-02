@@ -33,7 +33,7 @@ Why use separate planner and executor clients?
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 from pydantic import BaseModel
 
@@ -413,3 +413,62 @@ class PlannerExecutorPattern:
         )
 
         return synth_response.content or "\n".join(completed_results)
+
+    async def run_stream(
+        self,
+        user_message: str,
+        history: list[Message] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """
+        Run PLAN and EXECUTE phases synchronously; stream the SYNTHESISE response.
+        """
+        from mcp_agent_framework.types import StreamEvent
+
+        # Phase 1 — PLAN (same as run())
+        plan_messages = list(history or []) + [
+            Message(role="user", content=f"Create a step-by-step plan to: {user_message}")
+        ]
+        plan_data = await self._planner.complete_structured(
+            plan_messages, ExecutionPlan, system=self._config.system_prompt or None
+        )
+        plan_obj = ExecutionPlan(**plan_data)
+
+        # Phase 2 — EXECUTE (same as run())
+        completed_results: list[str] = []
+        i = 0
+        while i < len(plan_obj.steps):
+            step = plan_obj.steps[i]
+            step_prompt = build_step_prompt(step, completed_results, user_message)
+            for attempt in range(self._max_replan_attempts + 1):
+                try:
+                    result = await SingleAgentLoop(self._executor, self._config).run(step_prompt)
+                    completed_results.append(f"Step {step.step_number}: {result}")
+                    break
+                except Exception as exc:
+                    if attempt < self._max_replan_attempts:
+                        remaining = plan_obj.steps[i:]
+                        replan_prompt = build_replan_prompt(
+                            goal=user_message, completed=completed_results,
+                            failed_step=step, error=str(exc), remaining=remaining,
+                        )
+                        new_plan_data = await self._planner.complete_structured(
+                            [Message(role="user", content=replan_prompt)],
+                            ExecutionPlan, system=self._config.system_prompt or None,
+                        )
+                        new_plan = ExecutionPlan(**new_plan_data)
+                        plan_obj.steps[i:] = new_plan.steps
+                        for j, s in enumerate(plan_obj.steps):
+                            s.step_number = j + 1
+                        step = plan_obj.steps[i]
+                        step_prompt = build_step_prompt(step, completed_results, user_message)
+                    else:
+                        completed_results.append(f"Step {step.step_number} failed: {exc}")
+            i += 1
+
+        # Phase 3 — SYNTHESISE (streamed)
+        synthesis_prompt = build_synthesis_prompt(user_message, completed_results)
+        synth_messages = [Message(role="user", content=synthesis_prompt)]
+        async for event in self._planner.stream(
+            synth_messages, system=self._config.system_prompt or None
+        ):
+            yield event

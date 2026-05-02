@@ -35,9 +35,11 @@ import json
 import os
 from typing import Any
 
+from collections.abc import AsyncIterator
+
 from mcp_agent_framework.clients.base_client import BaseLLMClient
 from mcp_agent_framework.clients.schema_utils import StructuredOutputError, schema_from
-from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, ToolCall
+from mcp_agent_framework.types import LLMResponse, MCPTool, Message, StopReason, StreamEvent, ToolCall
 
 
 class OpenAIClient(BaseLLMClient):
@@ -186,6 +188,62 @@ class OpenAIClient(BaseLLMClient):
                 "parameters":  tool.input_schema,   # OpenAI key — NOT "input_schema"
             },
         }
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[MCPTool] | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        params: dict[str, Any] = {
+            "model":    self._model,
+            "messages": self._build_messages(messages, system),
+            "stream":   True,
+            **self._extra,
+        }
+        if tools:
+            params["tools"] = [self._encode_tool(t) for t in tools]
+
+        tool_chunks: dict[int, dict] = {}  # index → {id, name, arguments}
+        finish_reason: str | None = None
+
+        async for chunk in await self._client.chat.completions.create(**params):
+            choice = chunk.choices[0] if chunk.choices else None
+            if not choice:
+                continue
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+            delta = choice.delta
+            if getattr(delta, "content", None):
+                yield StreamEvent(type="text", delta=delta.content)
+            if getattr(delta, "tool_calls", None):
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_chunks:
+                        tool_chunks[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tool_chunks[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tool_chunks[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tool_chunks[idx]["arguments"] += tc_delta.function.arguments
+
+        for idx in sorted(tool_chunks):
+            tc = tool_chunks[idx]
+            try:
+                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            yield StreamEvent(type="tool_call", tool_name=tc["name"], tool_call_id=tc["id"], tool_args=args)
+
+        if finish_reason == "tool_calls":
+            sr = "tool_use"
+        elif finish_reason == "length":
+            sr = "max_tokens"
+        else:
+            sr = "end_turn"
+        yield StreamEvent(type="done", stop_reason=sr)
 
     # ── Decode: OpenAI → Canonical ───────────────────────────────────────────
 
