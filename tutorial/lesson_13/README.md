@@ -214,4 +214,4 @@ Print the generated plan. Then try breaking one step (make `calculate_totals` re
 
 ---
 
-*Lesson 13 of 20 — Applied AI Engineering*
+*Lesson 13 of 21 — Applied AI Engineering*

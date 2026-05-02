@@ -244,4 +244,4 @@ The trick: at the end of Session 1, the agent should call `remember()` to store 
 
 ---
 
-*Lesson 7 of 20 — Applied AI Engineering*
+*Lesson 7 of 21 — Applied AI Engineering*

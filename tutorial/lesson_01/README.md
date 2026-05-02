@@ -174,4 +174,4 @@ Fill in the gaps (the `list_tools` call). Run it. You will feel the loop manuall
 
 ---
 
-*Lesson 1 of 20 — Applied AI Engineering*
+*Lesson 1 of 21 — Applied AI Engineering*

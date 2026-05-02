@@ -247,4 +247,4 @@ This becomes your most valuable debug tool for everything that follows.
 
 ---
 
-*Lesson 16 of 20 — Applied AI Engineering*
+*Lesson 16 of 21 — Applied AI Engineering*

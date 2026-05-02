@@ -229,4 +229,4 @@ For each question: did it retrieve the right chunks? Did it answer correctly? Di
 
 ---
 
-*Lesson 17 of 20 — Applied AI Engineering*
+*Lesson 17 of 21 — Applied AI Engineering*

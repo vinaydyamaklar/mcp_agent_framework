@@ -223,4 +223,4 @@ Add timing to see if news and finance workers run in parallel. Check the orchest
 
 ---
 
-*Lesson 8 of 20 — Applied AI Engineering*
+*Lesson 8 of 21 — Applied AI Engineering*

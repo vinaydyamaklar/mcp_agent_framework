@@ -2329,26 +2329,26 @@ Estimated time: 40–60 hours of focused study and hands-on work.
 | Lesson | Topic | Key concept | Example file |
 |--------|-------|-------------|--------------|
 | 1  | Why agents exist | The problem they solve; tools vs agents vs workflows | `01_hello_agent.py` |
-| 2  | The ReAct loop | Observe → think → act; how SingleAgentLoop works | `01_hello_agent.py` |
-| 3  | Tools & MCP | What MCP is; FastMCP; tool definitions and schemas | `01_hello_agent.py` |
-| 4  | Provider clients | AnthropicClient, OpenAIClient, GeminiClient; canonical types | `02_structured_output.py` |
-| 5  | Structured output | Pydantic + `complete_structured()`; why it matters | `02_structured_output.py` |
-| 6  | Model Registry | Register models by name; swap providers in one line | `03_model_registry.py` |
-| 7  | Memory systems | SemanticMemory, EpisodicMemory, ProceduralMemory; when to use each | `08_memory_agent.py` |
-| 8  | Evaluation | LLMEvaluator, RubricEvaluator; scoring and quality gates | `05_evaluator_optimizer.py` |
-| 9  | EvaluatorOptimizer | Generate → evaluate → rewrite loop; convergence | `05_evaluator_optimizer.py` |
-| 10 | PlannerExecutor | Structured plans; dynamic replan on step failure | `06_planner_executor.py` |
-| 11 | Orchestrator-Worker | One brain, many specialised workers | — |
-| 12 | Hierarchy | Agents delegating to sub-agents; recursive depth | — |
-| 13 | Human-in-the-loop | Approval gates; `HumanInLoopPattern` vs LangGraph `interrupt()` | `04_human_in_loop.py` |
-| 14 | Parallel agents | Fan-out / gather; `ParallelPattern`; when parallelism helps | `07_parallel_agents.py` |
-| 15 | RAG | Chunking, embedding, cosine retrieval; `RecursiveTextChunker` | `10_rag.py` |
-| 16 | Agentic RAG | BM25, self-evaluation loop, multi-round retrieval | `11_agentic_rag.py` |
-| 17 | Resilience | RetryPolicy, CircuitBreaker; production reliability | — |
-| 18 | Observability | RunContext, LoggingTracer, custom tracers | — |
-| 19 | LangGraph integration | Checkpointing, interrupts, time travel, streaming | `langgraph+mcp_agent_framework/` |
-| 20 | Agentic Skills | Skill, SkillRegistry, SkillAwareAgent; composable capabilities | `12_skills.py` |
-| 21 | Multi-modal pipeline | Combining LLMs, image models, and local tools; rembg, DALL-E, Pillow | `product_image_pipeline.py` |
+| 2  | Types: the shared language | `Message`, `LLMResponse`, `ToolCall`, `StreamEvent`; why one type system matters | — |
+| 3  | Clients: talking to LLMs | `AnthropicClient`, `OpenAIClient`, `GeminiClient`; `stream()`; extended thinking | `02_structured_output.py` |
+| 4  | MCP: tools for your agent | FastMCP; `@app.tool`; in-process, stdio, HTTP transports; context-aware servers | `01_hello_agent.py` |
+| 5  | The single agent loop | ReAct loop; `run()` vs `run_stream()`; `system_prompt`; `max_iterations` | `01_hello_agent.py` |
+| 6  | Tool calling deep dive | Full lifecycle: `list_tools` → `ToolCall` → `call_tool` → result message | `01_hello_agent.py` |
+| 7  | Memory | `SemanticMemory`, `EpisodicMemory`, `ProceduralMemory`; memory as MCP tools | `08_memory_agent.py` |
+| 8  | Orchestrator pattern | One LLM, multiple MCP workers; tool routing; `asyncio.gather` | — |
+| 9  | Hierarchy pattern | Parent delegates to child agent loops; `call_agent__` synthetic tools | — |
+| 10 | Human-in-the-loop | Approval callbacks; `requires_approval`; sync vs async gates | `04_human_in_loop.py` |
+| 11 | Evaluation | `LLMEvaluator`, `RubricEvaluator`, `RubricCriterion`; scoring quality | `05_evaluator_optimizer.py` |
+| 12 | EvaluatorOptimizer | Generate → evaluate → rewrite loop; working history; convergence | `05_evaluator_optimizer.py` |
+| 13 | PlannerExecutor | Structured `ExecutionPlan`; dynamic replan on step failure; synthesis | `06_planner_executor.py` |
+| 14 | Parallel pattern | Fan-out / gather; independent subtasks; fault-tolerant synthesis | `07_parallel_agents.py` |
+| 15 | Resilience | `RetryPolicy` with jitter; `CircuitBreaker`; production reliability | — |
+| 16 | Observability | `RunContext`, `LoggingTracer`, `TraceEventType`; custom tracer backends | — |
+| 17 | RAG | Chunking, embedding, cosine retrieval; `RecursiveTextChunker` | `10_rag.py` |
+| 18 | Agentic RAG | BM25, self-evaluation loop, multi-round retrieval | `11_agentic_rag.py` |
+| 19 | LangGraph integration | Checkpointing, interrupts, time travel; when LangGraph beats this framework | `langgraph+mcp_agent_framework/` |
+| 20 | Skills | `Skill`, `SkillRegistry`, `SkillAwareAgent`; composable agentic capabilities | `12_skills.py` |
+| 21 | Multi-modal pipeline | LLM + image tools; rembg, DALL-E 3, Pillow; audience-driven scene generation | `product_image_pipeline.py` |
 
 ### How to use this curriculum
 
@@ -2376,7 +2376,7 @@ The lessons are cumulative. By Lesson 21 you will have built every component of 
 | **Conditional edges** | Route execution to different nodes based on LLM output, tool results, or custom logic - the graph topology itself is dynamic | Implemented in each pattern's Python loop; not a declarative graph |
 | **Human-in-the-loop at scale** | Interrupts + checkpointing combine to make async human review practical in production: the graph pauses, a human reviews hours later, execution resumes | `HumanInLoopPattern` is synchronous - the event loop blocks waiting for the approval callback |
 | **Time travel / branching** | Rewind to any earlier checkpoint and run a different branch from that point (useful for A/B testing agent behaviour or recovering from bad decisions) | Not supported |
-| **Streaming token-by-token** | Built-in support for streaming individual tokens out of any node as they are generated | `stream()` in `SingleAgentLoop` yields the full response as one chunk |
+| **Streaming token-by-token** | Built-in support for streaming individual tokens out of any node as they are generated | `run_stream()` on every pattern yields `StreamEvent` objects live; `AnthropicClient(enable_thinking=True)` also streams reasoning tokens |
 | **Studio UI** | LangGraph Studio gives a visual debugger: see the graph topology, step through node executions, inspect state at each checkpoint | Not included |
 
 **Why this framework doesn't use LangGraph:**

@@ -200,4 +200,4 @@ The root agent should call all three reviewers, collect their findings, and prod
 
 ---
 
-*Lesson 9 of 20 — Applied AI Engineering*
+*Lesson 9 of 21 — Applied AI Engineering*

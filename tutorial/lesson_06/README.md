@@ -296,4 +296,4 @@ Ask the agent a question. Watch how it handles the error — does it retry? Does
 
 ---
 
-*Lesson 6 of 20 — Applied AI Engineering*
+*Lesson 6 of 21 — Applied AI Engineering*

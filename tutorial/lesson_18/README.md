@@ -246,4 +246,4 @@ For each question: which approach gets it right? How many rounds does Agentic RA
 
 ---
 
-*Lesson 18 of 20 — Applied AI Engineering*
+*Lesson 18 of 21 — Applied AI Engineering*

@@ -242,4 +242,4 @@ async def deploy_to_production() -> str:
 
 ---
 
-*Lesson 10 of 20 — Applied AI Engineering*
+*Lesson 10 of 21 — Applied AI Engineering*

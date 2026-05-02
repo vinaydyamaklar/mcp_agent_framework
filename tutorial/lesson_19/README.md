@@ -292,4 +292,4 @@ Run it. Kill the process mid-research. Restart. Observe that it resumes from the
 
 ---
 
-*Lesson 19 of 20 — Applied AI Engineering*
+*Lesson 19 of 21 — Applied AI Engineering*

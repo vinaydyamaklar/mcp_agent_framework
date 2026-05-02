@@ -211,4 +211,4 @@ Watch the rewrite rounds. Print the draft and score at each round. Does it conve
 
 ---
 
-*Lesson 12 of 20 — Applied AI Engineering*
+*Lesson 12 of 21 — Applied AI Engineering*
