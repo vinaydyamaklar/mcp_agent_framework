@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-agent-framework"
+version = "0.1.0"
+description = "Reusable MCP agent patterns: single loop, orchestration, hierarchy, human-in-the-loop"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "google-genai>=1.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_agent_framework"]
