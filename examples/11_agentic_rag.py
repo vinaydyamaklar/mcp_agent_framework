@@ -63,142 +63,16 @@ REQUIREMENTS
 from __future__ import annotations
 
 import asyncio
-import math
-import re
-from collections import Counter
-from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import FastMCP
 
-from mcp_agent_framework import AnthropicClient, AgentConfig, Message
-from mcp_agent_framework.memory import SemanticMemory
+from mcp_agent_framework import AnthropicClient, AgentConfig, Message, AgenticRAGStore
 from mcp_agent_framework.patterns import SingleAgentLoop
 
-
-# =============================================================================
-# CHUNKER — same RecursiveTextChunker as example 10
-# =============================================================================
-
-class RecursiveTextChunker:
-    """Split text into overlapping chunks, respecting semantic boundaries."""
-
-    _SEPARATORS = ["\n\n", "\n", r"(?<=[.!?])\s+", r"(?<=,)\s+", " ", ""]
-
-    def __init__(self, chunk_size: int = 400, chunk_overlap: int = 60) -> None:
-        self.chunk_size    = chunk_size
-        self.chunk_overlap = chunk_overlap
-
-    def split(self, text: str) -> list[str]:
-        return self._split(text.strip(), self._SEPARATORS)
-
-    def _split(self, text: str, separators: list[str]) -> list[str]:
-        if len(text) <= self.chunk_size:
-            return [text] if text else []
-        sep  = separators[0]
-        rest = separators[1:]
-        pieces = re.split(sep, text) if sep else list(text)
-        chunks: list[str] = []
-        current = ""
-        for piece in pieces:
-            if len(current) + len(piece) + 1 > self.chunk_size and current:
-                chunks.append(current.strip())
-                words = current.split()
-                overlap_text = " ".join(words[max(0, len(words) - 20):])
-                current = overlap_text + " " + piece
-            else:
-                current = (current + " " + piece).strip() if current else piece
-        if current.strip():
-            if len(current) > self.chunk_size and rest:
-                chunks.extend(self._split(current.strip(), rest))
-            else:
-                chunks.append(current.strip())
-        return chunks
-
-
-# =============================================================================
-# KNOWLEDGE BASE — semantic store + keyword (BM25) index
-#
-# Agentic RAG benefits from TWO retrieval modes:
-#   Semantic:  cosine similarity — finds conceptually related chunks
-#   Keyword:   BM25 scoring     — finds chunks with matching exact terms
-#
-# Hybrid search (combining both) is the production default, but exposing
-# them as separate tools lets the agent choose the right strategy per query.
-# =============================================================================
-
-@dataclass
-class _Chunk:
-    text:   str
-    source: str
-    index:  int
-
-
-class AgenticRAGStore:
-    """Dual-mode knowledge base: semantic (cosine) + keyword (BM25)."""
-
-    def __init__(self) -> None:
-        self._semantic  = SemanticMemory()
-        self._chunks:    list[_Chunk] = []      # for BM25 keyword search
-        self._chunker    = RecursiveTextChunker(400, 60)
-        self._sources:   set[str] = set()
-
-    # ── Ingestion ────────────────────────────────────────────────────────────
-
-    async def add_document(self, text: str, source: str) -> int:
-        raw_chunks = self._chunker.split(text)
-        for i, chunk in enumerate(raw_chunks):
-            await self._semantic.add(chunk, metadata={"source": source, "idx": i})
-            self._chunks.append(_Chunk(chunk, source, i))
-        self._sources.add(source)
-        return len(raw_chunks)
-
-    def stats(self) -> dict[str, Any]:
-        return {"total_chunks": len(self._chunks), "sources": sorted(self._sources)}
-
-    # ── Semantic retrieval ───────────────────────────────────────────────────
-
-    async def search_semantic(self, query: str, top_k: int = 4) -> list[dict]:
-        results = await self._semantic.search(query, top_k=top_k)
-        return [{"text": r.content, "source": r.metadata.get("source", "?")}
-                for r in results]
-
-    # ── Keyword retrieval (BM25) ─────────────────────────────────────────────
-    # BM25 formula: score = IDF × TF(k+1) / (TF + k(1 − b + b × dl/avgdl))
-    # where k=1.5, b=0.75 are standard BM25 parameters.
-
-    def search_keyword(self, query: str, top_k: int = 4) -> list[dict]:
-        if not self._chunks:
-            return []
-        query_terms = set(query.lower().split())
-        k, b = 1.5, 0.75
-
-        # Build corpus term-frequency table once per query
-        doc_tfs:  list[Counter] = [Counter(c.text.lower().split()) for c in self._chunks]
-        avgdl     = sum(sum(tf.values()) for tf in doc_tfs) / max(len(doc_tfs), 1)
-        df:       Counter = Counter()
-        for tf in doc_tfs:
-            for term in tf:
-                df[term] += 1
-        N = len(self._chunks)
-
-        scores: list[tuple[float, _Chunk]] = []
-        for chunk, tf in zip(self._chunks, doc_tfs):
-            dl    = sum(tf.values())
-            score = 0.0
-            for term in query_terms:
-                if term not in tf:
-                    continue
-                idf = math.log((N - df[term] + 0.5) / (df[term] + 0.5) + 1)
-                tf_score = (tf[term] * (k + 1)) / (
-                    tf[term] + k * (1 - b + b * dl / max(avgdl, 1))
-                )
-                score += idf * tf_score
-            if score > 0:
-                scores.append((score, chunk))
-
-        scores.sort(key=lambda x: x[0], reverse=True)
-        return [{"text": c.text, "source": c.source} for _, c in scores[:top_k]]
+# AgenticRAGStore provides: search_semantic, search_keyword, search_hybrid (RRF)
+# All live in mcp_agent_framework.rag — import directly to customise:
+#   from mcp_agent_framework.rag import AgenticRAGStore, RecursiveTextChunker
 
 
 # =============================================================================
@@ -268,7 +142,7 @@ async def search_knowledge(query: str, top_k: int = 5) -> str:
     results = await rag_store.search_semantic(query, top_k=top_k)
     if not results:
         return "No relevant results found."
-    parts = [f"[{r['source']}]\n{r['text']}" for r in results]
+    parts = [f"[{r.source}]\n{r.text}" for r in results]
     return "\n\n---\n\n".join(parts)
 
 
@@ -281,7 +155,7 @@ async def search_keyword(query: str, top_k: int = 5) -> str:
     results = rag_store.search_keyword(query, top_k=top_k)
     if not results:
         return "No keyword matches found."
-    parts = [f"[{r['source']}]\n{r['text']}" for r in results]
+    parts = [f"[{r.source}]\n{r.text}" for r in results]
     return "\n\n---\n\n".join(parts)
 
 

@@ -158,6 +158,14 @@ from mcp_agent_framework.observability import (
     BaseTracer, LoggingTracer,
 )
 
+# RAG
+from mcp_agent_framework.rag import (
+    RecursiveTextChunker,
+    RAGStore,
+    AgenticRAGStore,
+    RetrievalResult,
+)
+
 # Skills
 from mcp_agent_framework.skills import (
     Skill, SkillRegistry, SkillAwareAgent,
@@ -194,6 +202,11 @@ __all__ = [
     # memory
     "AbstractMemoryStore", "MemoryEntry",
     "SemanticMemory", "EpisodicMemory", "ProceduralMemory",
+    # rag
+    "RecursiveTextChunker",
+    "RAGStore",
+    "AgenticRAGStore",
+    "RetrievalResult",
     # resilience
     "RetryPolicy", "RetryExhaustedError",
     "CircuitBreaker", "CircuitState", "CircuitOpenError",

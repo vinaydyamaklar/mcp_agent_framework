@@ -46,96 +46,15 @@ REQUIREMENTS
 from __future__ import annotations
 
 import asyncio
-import re
-from dataclasses import dataclass, field
-from typing import Any
 
 from fastmcp import FastMCP
 
-from mcp_agent_framework import AnthropicClient, AgentConfig
-from mcp_agent_framework.memory import SemanticMemory
+from mcp_agent_framework import AnthropicClient, AgentConfig, RAGStore
 from mcp_agent_framework.patterns import SingleAgentLoop
 
-
-# =============================================================================
-# CHUNKER — RecursiveTextChunker
-#
-# Splits text by trying coarser separators first (paragraphs → sentences →
-# words). Each resulting piece that is still too large is split recursively
-# with the next finer separator. Overlap preserves cross-boundary context.
-# =============================================================================
-
-class RecursiveTextChunker:
-    """Split text into overlapping chunks, respecting semantic boundaries."""
-
-    _SEPARATORS = ["\n\n", "\n", r"(?<=[.!?])\s+", r"(?<=,)\s+", " ", ""]
-
-    def __init__(self, chunk_size: int = 400, chunk_overlap: int = 60) -> None:
-        self.chunk_size    = chunk_size
-        self.chunk_overlap = chunk_overlap
-
-    def split(self, text: str) -> list[str]:
-        return self._split(text.strip(), self._SEPARATORS)
-
-    def _split(self, text: str, separators: list[str]) -> list[str]:
-        if len(text) <= self.chunk_size:
-            return [text] if text else []
-
-        sep = separators[0]
-        rest = separators[1:]
-
-        pieces = re.split(sep, text) if sep else list(text)
-        chunks: list[str] = []
-        current = ""
-
-        for piece in pieces:
-            if len(current) + len(piece) + 1 > self.chunk_size and current:
-                chunks.append(current.strip())
-                # carry overlap forward
-                words = current.split()
-                overlap_text = " ".join(words[max(0, len(words) - 20):])
-                current = overlap_text + " " + piece
-            else:
-                current = (current + " " + piece).strip() if current else piece
-
-        if current.strip():
-            # recursively split any piece still too large
-            if len(current) > self.chunk_size and rest:
-                chunks.extend(self._split(current.strip(), rest))
-            else:
-                chunks.append(current.strip())
-
-        return chunks
-
-
-# =============================================================================
-# KNOWLEDGE BASE — thin wrapper around SemanticMemory
-#
-# SemanticMemory stores text with embeddings and retrieves by cosine similarity.
-# The RAGStore adds chunking: one document-string in → multiple chunks stored.
-# =============================================================================
-
-class RAGStore:
-    """Chunk documents and store them in SemanticMemory for retrieval."""
-
-    def __init__(self, chunk_size: int = 400, chunk_overlap: int = 60) -> None:
-        self._memory  = SemanticMemory()
-        self._chunker = RecursiveTextChunker(chunk_size, chunk_overlap)
-
-    async def add_document(self, text: str, source: str) -> int:
-        """Chunk text and store all chunks. Returns number of chunks created."""
-        chunks = self._chunker.split(text)
-        for i, chunk in enumerate(chunks):
-            await self._memory.add(chunk, metadata={"source": source, "chunk": i})
-        return len(chunks)
-
-    async def search(self, query: str, top_k: int = 4) -> list[dict[str, Any]]:
-        """Return top-k chunks most relevant to the query."""
-        results = await self._memory.search(query, top_k=top_k)
-        return [
-            {"text": r.content, "source": r.metadata.get("source", "unknown")}
-            for r in results
-        ]
+# RAGStore and RecursiveTextChunker live in mcp_agent_framework.rag
+# Import directly if you need to customise:
+#   from mcp_agent_framework.rag import RAGStore, RecursiveTextChunker
 
 
 # =============================================================================
@@ -240,7 +159,7 @@ async def search_knowledge(query: str, top_k: int = 4) -> str:
     results = await store.search(query, top_k=top_k)
     if not results:
         return "No relevant information found in the knowledge base."
-    parts = [f"[{r['source']}]\n{r['text']}" for r in results]
+    parts = [f"[{r.source}]\n{r.text}" for r in results]
     return "\n\n---\n\n".join(parts)
 
 
@@ -252,7 +171,7 @@ async def main() -> None:
     # ── Step 1: Ingest documents ─────────────────────────────────────────────
     print("Ingesting documents into knowledge base...")
     for source, text in DOCUMENTS.items():
-        n = await store.add_document(text, source)
+        n = await store.add_document(text, source=source)
         print(f"  {source} → {n} chunks")
 
     # ── Step 2: Build the RAG agent ──────────────────────────────────────────
