@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 venv/
-.env
 .venv/
 
 # Node
@@ -11,6 +10,6 @@ dist/
 build/
 
 # IDE
-.vscode/
 .idea/
 .DS_Store
+config.bat
