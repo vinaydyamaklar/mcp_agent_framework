@@ -1,10 +1,15 @@
 """
 =============================================================================
-Example 09 — Robust Agentic RAG System
+Advanced RAG Techniques — Deep Dive Reference
 =============================================================================
 
 WHAT THIS EXAMPLE TEACHES
 --------------------------
+This is a companion deep-dive reference for Lessons 17 (RAG) and 18 (Agentic RAG).
+It covers every chunking and retrieval technique in detail — more than either lesson
+example (10_rag.py, 11_agentic_rag.py) — for learners who want to understand the
+full landscape before choosing what to use in production.
+
 This is the most complete example in the suite. It builds a production-grade
 Agentic RAG (Retrieval-Augmented Generation) system from scratch using only
 this framework — no LangChain, no LlamaIndex.
@@ -95,14 +100,14 @@ MultiQuery         | ★★★★★   | ★★★     | ★★★★★    | �
 RUNNING
 -------
     # For plain text examples (no PDF):
-    python examples/09_agentic_rag.py
+    python examples/advanced_rag_techniques.py
 
     # Run specific demos only:
-    python examples/09_agentic_rag.py --demos A,B,C
+    python examples/advanced_rag_techniques.py --demos A,B,C
 
     # For PDF examples (requires pdfplumber):
     pip install pdfplumber
-    python examples/09_agentic_rag.py --pdf path/to/your.pdf
+    python examples/advanced_rag_techniques.py --pdf path/to/your.pdf
 
 REQUIREMENTS
 ------------
@@ -130,6 +135,10 @@ from fastmcp import FastMCP
 
 from mcp_agent_framework import AgentConfig, AnthropicClient, Message
 from mcp_agent_framework.memory import SemanticMemory
+from mcp_agent_framework.rag import RecursiveTextChunker
+# RecursiveTextChunker is provided by the framework.
+# FixedSizeChunker, SemanticChunker, LayoutAwarePDFChunker are defined in
+# this file — they are not yet in the framework.
 from mcp_agent_framework.patterns import (
     PlannerExecutorPattern,
     SingleAgentLoop,
@@ -199,6 +208,29 @@ class DocumentChunk:
             f"DocumentChunk(id={self.chunk_id}, type={self.chunk_type}, "
             f"source={self.source!r}, idx={self.chunk_index}, text={preview!r}...)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Helper — convert chunker output (list[str]) to DocumentChunk objects.
+# Used wherever RecursiveTextChunker.split() is called (the framework version
+# has no split_documents() method — that lives on the local chunker classes).
+# ---------------------------------------------------------------------------
+
+def _to_doc_chunks(
+    raw: list[str],
+    source: str,
+    extra_metadata: dict[str, Any] | None = None,
+) -> list[DocumentChunk]:
+    """Wrap a list of raw text strings into DocumentChunk objects."""
+    return [
+        DocumentChunk(
+            text=chunk,
+            source=source,
+            chunk_index=i,
+            metadata={**(extra_metadata or {})},
+        )
+        for i, chunk in enumerate(raw)
+    ]
 
 
 # =============================================================================
@@ -271,118 +303,15 @@ class FixedSizeChunker:
 
 
 # =============================================================================
-# SECTION 3 — RecursiveTextChunker
+# SECTION 3 — RecursiveTextChunker  (imported from framework)
 #
-# Splits plain text into semantically coherent chunks by trying progressively
-# finer separators. Same algorithm as LangChain RecursiveCharacterTextSplitter
-# but implemented in ~80 lines of pure Python with zero dependencies.
+# RecursiveTextChunker is provided by mcp_agent_framework.rag. It splits text
+# on natural boundaries (paragraph → sentence → word) with overlap.
+# See: src/mcp_agent_framework/rag/chunker.py
 #
-# WHEN TO USE: Default choice for plain text, markdown, HTML stripped to text,
-# any unstructured prose document. Gets the best semantic coherence without
-# needing an embedding model (unlike SemanticChunker).
+# WHEN TO USE: Default choice for plain text, markdown, HTML stripped to text.
+# Gets the best semantic coherence without needing an embedding model.
 # =============================================================================
-
-class RecursiveTextChunker:
-    """
-    Split text into overlapping chunks, preferring semantic boundaries.
-
-    The algorithm tries separators in priority order (coarsest → finest):
-        \\n\\n   — paragraph breaks  (preferred: keeps paragraphs together)
-        \\n     — line breaks
-        . /!/? — sentence endings
-        ,      — clause boundaries
-        ' '    — word boundaries    (last resort before character split)
-        ''     — character split    (only if a single word > chunk_size)
-
-    For each piece produced by a separator, if it still exceeds chunk_size,
-    the algorithm RECURSES with the next finer separator. This ensures the
-    coarsest possible semantic unit is always used.
-
-    OVERLAP: each chunk shares `chunk_overlap` characters with the previous
-    chunk. This preserves cross-boundary context — a sentence spanning two
-    chunks is readable in full in the second chunk.
-
-        Chunk 1: [======================]
-        Chunk 2:             [======================]
-                             ^----overlap----^
-
-    Best used for:
-        • Plain text, markdown, HTML (stripped), source code prose
-        • Most general-purpose document ingestion
-        • When you cannot afford an embedding model for chunking (SemanticChunker)
-    """
-
-    DEFAULT_SEPARATORS = ["\n\n", "\n", r"(?<=[.!?])\s+", r"(?<=,)\s+", " ", ""]
-
-    def __init__(
-        self,
-        chunk_size:    int = 512,
-        chunk_overlap: int = 64,
-        separators:    list[str] | None = None,
-    ) -> None:
-        if chunk_overlap >= chunk_size:
-            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be < chunk_size ({chunk_size})")
-        self.chunk_size    = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.separators    = separators or self.DEFAULT_SEPARATORS
-
-    def split(self, text: str) -> list[str]:
-        """Split text into chunks. Returns list of strings."""
-        text = text.strip()
-        if not text:
-            return []
-        chunks = self._recursive_split(text, self.separators)
-        return self._merge_with_overlap(chunks)
-
-    def split_documents(
-        self, text: str, source: str,
-        extra_metadata: dict[str, Any] | None = None,
-    ) -> list[DocumentChunk]:
-        """Split text and wrap each piece in a DocumentChunk."""
-        raw_chunks = self.split(text)
-        return [
-            DocumentChunk(
-                text=chunk, source=source, chunk_index=i,
-                chunk_type="paragraph",
-                metadata={**(extra_metadata or {}), "char_index": i * self.chunk_size},
-            )
-            for i, chunk in enumerate(raw_chunks)
-        ]
-
-    def _recursive_split(self, text: str, separators: list[str]) -> list[str]:
-        if not separators:
-            return [text]
-        sep = separators[0]
-        if sep == "":
-            return list(text)
-        pieces = re.split(sep, text)
-        pieces = [p for p in pieces if p.strip()]
-        result: list[str] = []
-        for piece in pieces:
-            if len(piece) <= self.chunk_size:
-                result.append(piece)
-            else:
-                result.extend(self._recursive_split(piece, separators[1:]))
-        return result
-
-    def _merge_with_overlap(self, pieces: list[str]) -> list[str]:
-        if not pieces:
-            return []
-        chunks:  list[str] = []
-        current: list[str] = []
-        current_len = 0
-        for piece in pieces:
-            piece_len = len(piece)
-            if current_len + piece_len + (1 if current else 0) > self.chunk_size and current:
-                chunks.append("\n".join(current))
-                while current and current_len > self.chunk_overlap:
-                    removed = current.pop(0)
-                    current_len -= len(removed) + 1
-            current.append(piece)
-            current_len += piece_len + (1 if len(current) > 1 else 0)
-        if current:
-            chunks.append("\n".join(current))
-        return chunks
 
 
 # =============================================================================
@@ -1413,7 +1342,7 @@ class RAGStore:
         extra_metadata: dict[str, Any] | None = None,
     ) -> int:
         """Ingest plain text with RecursiveTextChunker (default)."""
-        chunks = self._text_chunker.split_documents(text, source, extra_metadata)
+        chunks = _to_doc_chunks(self._text_chunker.split(text), source, extra_metadata)
         return await self.ingest_chunks(chunks)
 
     async def ingest_text_fixed(
@@ -1908,7 +1837,12 @@ async def demo_a_chunking_comparison() -> None:
     ]
 
     for name, chunker in chunkers:
-        chunks = chunker.split_documents(sample_text, source)
+        # FixedSizeChunker has split_documents(); RecursiveTextChunker (framework)
+        # uses split() — _to_doc_chunks wraps the result uniformly.
+        if hasattr(chunker, "split_documents"):
+            chunks = chunker.split_documents(sample_text, source)
+        else:
+            chunks = _to_doc_chunks(chunker.split(sample_text), source)
         print(f"\n{name}:")
         print(f"  → {len(chunks)} chunks produced")
         for i, chunk in enumerate(chunks[:3]):
